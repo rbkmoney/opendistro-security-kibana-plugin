@@ -29,6 +29,8 @@ export default function (kibana) {
                     name: Joi.string().default('security_authentication'),
                     password: Joi.string().min(32).default('security_cookie_default_password'),
                     ttl: Joi.number().integer().min(0).default(60 * 60 * 1000),
+                    domain: Joi.string(),
+                    isSameSite: Joi.valid('Strict', 'Lax').allow(false).default(false),
                 }).default(),
                 session: Joi.object().keys({
                     ttl: Joi.number().integer().min(0).default(60 * 60 * 1000),
@@ -242,7 +244,7 @@ export default function (kibana) {
 
         },
 
-        init(server, options) {
+        async init(server, options) {
 
             APP_ROOT = '';
             API_ROOT = `${APP_ROOT}/api/v1`;
@@ -280,8 +282,6 @@ export default function (kibana) {
             const securityConfigurationBackend = new ConfigurationBackendClass(server, server.config);
             server.expose('getSecurityConfigurationBackend', () => securityConfigurationBackend);
 
-            server.register([require('hapi-async-handler')]);
-
             let authType = config.get('opendistro_security.auth.type');
             let authClass = null;
 
@@ -306,19 +306,14 @@ export default function (kibana) {
                 password: config.get('opendistro_security.cookie.password'),
                 encoding: 'iron',
                 isSecure: config.get('opendistro_security.cookie.secure'),
+                isSameSite: config.get('opendistro_security.cookie.isSameSite')
             });
 
             if (authType && authType !== '' && ['basicauth', 'jwt', 'openid', 'saml', 'proxycache'].indexOf(authType) > -1) {
-
-                server.register([
-                    require('hapi-auth-cookie'),
-                ], (error) => {
-
-                    if (error) {
-                        server.log(['error', 'security'], `An error occurred registering server plugins: ${error}`);
-                        this.status.red('An error occurred during initialisation, please check the logs.');
-                        return;
-                    }
+                try {
+                    await server.register({
+                        plugin: require('hapi-auth-cookie')
+                    });
 
                     this.status.yellow('Initialising Security authentication plugin.');
 
@@ -350,15 +345,27 @@ export default function (kibana) {
                     }
 
                     if (authClass) {
-                        authClass.init();
+                        try {
+                          // At the moment this is mainly to catch an error where the openid connect_url is wrong
+                          await authClass.init();
+                        } catch (error) {
+                            server.log(['error', 'searchguard'], `An error occurred while enabling session management: ${error}`);
+                            this.status.red('An error occurred during initialisation, please check the logs.');
+                            return;
+                        }
+
                         this.status.yellow('Security session management enabled.');
                     }
-                });
+              } catch (error) {
+                  server.log(['error', 'searchguard'], `An error occurred registering server plugins: ${error}`);
+                  this.status.red('An error occurred during initialisation, please check the logs.');
+                  return;
+              }
 
             } else {
                 // Register the storage plugin for the other auth types
                 server.register({
-                    register: pluginRoot('lib/session/sessionPlugin'),
+                    plugin: pluginRoot('lib/session/sessionPlugin'),
                     options: {
                         authType: null,
                     }
@@ -394,7 +401,8 @@ export default function (kibana) {
                     clearInvalid: true, // remove invalid cookies
                     strictHeader: true, // don't allow violations of RFC 6265
                     encoding: 'iron',
-                    password: config.get("opendistro_security.cookie.password")
+                    password: config.get("opendistro_security.cookie.password"),
+                    isSameSite: config.get('opendistro_security.cookie.isSameSite')
                 });
 
                 this.status.yellow("Security multitenancy registered.");
